@@ -86,7 +86,19 @@ async function listPaginated(companyId, filters = {}) {
   return { data: dataRes.rows, total: countRes.rows[0]?.total || 0, limit, offset };
 }
 
-async function getById(id) {
+// Company-scoped read. Pass companyId from a route handler so a caller can only
+// see its own tenant's row (mismatch ⇒ null ⇒ route 404). Internal callers that
+// legitimately need any row use getByIdUnscoped (kept private to this module).
+async function getById(id, companyId) {
+  if (companyId === undefined || companyId === null) return getByIdUnscoped(id);
+  const result = await query(
+    `SELECT * FROM contacts WHERE id = $1 AND company_id = $2 AND deleted_at IS NULL LIMIT 1`,
+    [id, companyId]
+  );
+  return result.rows[0] || null;
+}
+
+async function getByIdUnscoped(id) {
   const result = await query(`SELECT * FROM contacts WHERE id = $1 AND deleted_at IS NULL LIMIT 1`, [id]);
   return result.rows[0] || null;
 }
@@ -144,13 +156,15 @@ async function create(data) {
   return result.rows[0] || contact;
 }
 
-async function update(id, data) {
+// Company-scoped update. When companyId is passed, the WHERE clause restricts to
+// that tenant — a cross-tenant id returns no row ⇒ null ⇒ route 404.
+async function update(id, data, companyId) {
   const now = new Date().toISOString();
   data.updated_at = now;
 
   const ALLOWED_CONTACT_COLUMNS = ['name','email','phone','company_name','title','linkedin_url','source','lead_score','lead_score_numeric','deal_stage','deal_value','tags','utm_source','utm_medium','utm_campaign','utm_content','metadata','last_contacted','next_follow_up','updated_at'];
   const fields = Object.keys(data).filter(k => ALLOWED_CONTACT_COLUMNS.includes(k));
-  if (fields.length === 0) return getById(id);
+  if (fields.length === 0) return getById(id, companyId);
 
   const setClauses = [];
   const params = [];
@@ -171,32 +185,51 @@ async function update(id, data) {
   }
 
   params.push(id);
-  const sql = `UPDATE contacts SET ${setClauses.join(', ')} WHERE id = $${pIdx} RETURNING *`;
+  let where = `id = $${pIdx}`;
+  if (companyId !== undefined && companyId !== null) {
+    params.push(companyId);
+    where += ` AND company_id = $${pIdx + 1}`;
+  }
+  const sql = `UPDATE contacts SET ${setClauses.join(', ')} WHERE ${where} RETURNING *`;
   const result = await query(sql, params);
   return result.rows[0] || null;
 }
 
-async function addActivity(contactId, entry) {
+// When companyId is passed, the activity is only written if the contact belongs
+// to that tenant (returns false on mismatch — route maps to 404).
+async function addActivity(contactId, entry, companyId) {
   const timestamped = { ...entry, timestamp: entry.timestamp || new Date().toISOString() };
 
-  let companyId = timestamped.company_id || null;
-  if (!companyId) {
-    const r = await query(`SELECT company_id FROM contacts WHERE id = $1`, [contactId]);
-    companyId = r.rows[0]?.company_id || null;
+  const r = await query(`SELECT company_id FROM contacts WHERE id = $1 AND deleted_at IS NULL`, [contactId]);
+  const rowCompany = r.rows[0]?.company_id || null;
+  if (companyId !== undefined && companyId !== null) {
+    if (!rowCompany || rowCompany !== companyId) return false; // cross-tenant or missing
   }
+  const effectiveCompany = timestamped.company_id || rowCompany;
 
   await query(
     `INSERT INTO contact_activity (contact_id, company_id, type, message, channel, data, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [
-      contactId, companyId, timestamped.type, timestamped.message,
+      contactId, effectiveCompany, timestamped.type, timestamped.message,
       timestamped.channel || null, JSON.stringify(timestamped),
       timestamped.timestamp,
     ]
   );
+  return true;
 }
 
-async function getActivity(contactId, limit = 50) {
+async function getActivity(contactId, limit = 50, companyId) {
+  if (companyId !== undefined && companyId !== null) {
+    const result = await query(
+      `SELECT ca.* FROM contact_activity ca
+        WHERE ca.contact_id = $1
+          AND EXISTS (SELECT 1 FROM contacts c WHERE c.id = ca.contact_id AND c.company_id = $3)
+        ORDER BY ca.created_at DESC LIMIT $2`,
+      [contactId, limit, companyId]
+    );
+    return result.rows;
+  }
   const result = await query(
     `SELECT * FROM contact_activity WHERE contact_id = $1 ORDER BY created_at DESC LIMIT $2`,
     [contactId, limit]

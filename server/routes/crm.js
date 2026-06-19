@@ -309,7 +309,8 @@ router.get('/contacts/follow-ups', async (req, res) => {
 // GET /api/crm/contacts/:id
 router.get('/contacts/:id', async (req, res) => {
   try {
-    const contact = await contactDb.getById(req.params.id);
+    const companyId = getUserCompanyId(req);
+    const contact = await contactDb.getById(req.params.id, companyId);
     if (!contact) return res.status(404).json({ error: 'contact not found' });
     res.json(contact);
   } catch (err) {
@@ -321,7 +322,8 @@ router.get('/contacts/:id', async (req, res) => {
 // PATCH /api/crm/contacts/:id
 router.patch('/contacts/:id', async (req, res) => {
   try {
-    const existing = await contactDb.getById(req.params.id);
+    const companyId = getUserCompanyId(req);
+    const existing = await contactDb.getById(req.params.id, companyId);
     if (!existing) return res.status(404).json({ error: 'contact not found' });
 
     const updates = req.body;
@@ -349,7 +351,7 @@ router.patch('/contacts/:id', async (req, res) => {
         message: updates.activity_message,
         agent: updates.agent || 'system',
         data: updates.activity_data || null
-      });
+      }, companyId);
     }
 
     if (updates.deal_stage && updates.deal_stage !== existing.deal_stage) {
@@ -368,12 +370,12 @@ router.patch('/contacts/:id', async (req, res) => {
       await contactDb.addActivity(req.params.id, {
         type: 'stage_change',
         message: `Stage: ${oldStage} → ${newStage}`,
-      });
+      }, companyId);
 
       triggerStageAutomation({ ...existing, ...updateData }, oldStage, newStage).catch(() => {});
     }
 
-    const contact = await contactDb.update(req.params.id, updateData);
+    const contact = await contactDb.update(req.params.id, updateData, companyId);
     broadcast(req, { type: 'contact_updated', contact: contact || existing });
 
     res.json(contact || existing);
@@ -386,8 +388,11 @@ router.patch('/contacts/:id', async (req, res) => {
 // GET /api/crm/contacts/:id/activity
 router.get('/contacts/:id/activity', async (req, res) => {
   try {
+    const companyId = getUserCompanyId(req);
+    const contact = await contactDb.getById(req.params.id, companyId);
+    if (!contact) return res.status(404).json({ error: 'contact not found' });
     const limit = parseInt(req.query.limit) || 50;
-    const activity = await contactDb.getActivity(req.params.id, limit);
+    const activity = await contactDb.getActivity(req.params.id, limit, companyId);
     res.json({ activity });
   } catch (err) {
     console.error('[CRM] GET /contacts/:id/activity error:', err.message);
@@ -398,7 +403,8 @@ router.get('/contacts/:id/activity', async (req, res) => {
 // POST /api/crm/contacts/:id/activity
 router.post('/contacts/:id/activity', validate(), async (req, res) => {
   try {
-    const contact = await contactDb.getById(req.params.id);
+    const companyId = getUserCompanyId(req);
+    const contact = await contactDb.getById(req.params.id, companyId);
     if (!contact) return res.status(404).json({ error: 'contact not found' });
 
     const { type, message, agent, data, channel } = req.body;
@@ -413,11 +419,11 @@ router.post('/contacts/:id/activity', validate(), async (req, res) => {
       data: data || null
     };
 
-    await contactDb.addActivity(req.params.id, entry);
+    await contactDb.addActivity(req.params.id, entry, companyId);
 
     const SCORE_WEIGHTS = { email_opened: 2, email_clicked: 5, email_replied: 10, call_booked: 25, call_completed: 30, form_submitted: 15, payment: 50 };
     const weight = SCORE_WEIGHTS[entry.type] || 1;
-    await query(`UPDATE contacts SET lead_score_numeric = LEAST(COALESCE(lead_score_numeric, 0) + $1, 100) WHERE id = $2`, [weight, req.params.id]);
+    await query(`UPDATE contacts SET lead_score_numeric = LEAST(COALESCE(lead_score_numeric, 0) + $1, 100) WHERE id = $2 AND company_id = $3`, [weight, req.params.id, companyId]);
 
     broadcast(req, { type: 'contact_activity', contact_id: req.params.id, entry });
     res.json(entry);
@@ -501,7 +507,8 @@ router.post('/deals', validate(), async (req, res) => {
 // GET /api/crm/deals/:id
 router.get('/deals/:id', async (req, res) => {
   try {
-    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 LIMIT 1`, [req.params.id]);
+    const companyId = getUserCompanyId(req);
+    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 AND company_id = $2 LIMIT 1`, [req.params.id, companyId]);
     if (rows.length === 0) return res.status(404).json({ error: 'deal not found' });
     const row = rows[0];
     const meta = (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) || {};
@@ -521,7 +528,8 @@ router.get('/deals/:id', async (req, res) => {
 // PATCH /api/crm/deals/:id
 router.patch('/deals/:id', async (req, res) => {
   try {
-    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 LIMIT 1`, [req.params.id]);
+    const companyId = getUserCompanyId(req);
+    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 AND company_id = $2 LIMIT 1`, [req.params.id, companyId]);
     if (rows.length === 0) return res.status(404).json({ error: 'deal not found' });
 
     const row = rows[0];
@@ -555,22 +563,25 @@ router.patch('/deals/:id', async (req, res) => {
         deal.closed_at = new Date().toISOString();
       }
       if (deal.contact_id) {
+        // Cross-write is company-scoped: addActivity only writes if the contact
+        // belongs to this deal's company (no-op otherwise), so a deal cannot
+        // annotate a contact in another tenant.
         await contactDb.addActivity(deal.contact_id, {
           type: 'deal_stage_change',
           message: `Deal "${deal.title}" moved from ${oldStage} to ${newStage}`,
           channel: 'crm',
           data: { deal_id: deal.id, old_stage: oldStage, new_stage: newStage, value: deal.value }
-        });
+        }, companyId);
       }
     }
 
     deal.updated_at = new Date().toISOString();
 
     await query(
-      `UPDATE deals SET title=$1, value=$2, stage=$3, contact_id=$4, metadata=$5, updated_at=NOW() WHERE id=$6`,
+      `UPDATE deals SET title=$1, value=$2, stage=$3, contact_id=$4, metadata=$5, updated_at=NOW() WHERE id=$6 AND company_id=$7`,
       [deal.title, deal.value, deal.stage, deal.contact_id,
        JSON.stringify({ contact_name: deal.contact_name, notes: deal.notes, activity: deal.activity, closed_at: deal.closed_at }),
-       deal.id]
+       deal.id, companyId]
     );
 
     broadcast(req, { type: 'deal_updated', deal });
@@ -622,7 +633,8 @@ router.get('/stats', async (req, res) => {
 // PATCH /api/crm/contacts/:id/follow-up
 router.patch('/contacts/:id/follow-up', async (req, res) => {
   try {
-    const existing = await contactDb.getById(req.params.id);
+    const companyId = getUserCompanyId(req);
+    const existing = await contactDb.getById(req.params.id, companyId);
     if (!existing) return res.status(404).json({ error: 'contact not found' });
 
     const { next_follow_up, action_taken, notes } = req.body;
@@ -635,9 +647,9 @@ router.patch('/contacts/:id/follow-up', async (req, res) => {
       message: action_taken || 'Follow-up completed',
       agent: req.body.agent || 'human',
       data: { notes, next_follow_up }
-    });
+    }, companyId);
 
-    const contact = await contactDb.update(req.params.id, updateData);
+    const contact = await contactDb.update(req.params.id, updateData, companyId);
     broadcast(req, { type: 'contact_updated', contact: contact || existing });
     res.json(contact || existing);
   } catch (err) {
@@ -694,12 +706,159 @@ router.get('/pipeline', async (req, res) => {
   }
 });
 
+// GET /api/crm/pipeline/transitions — the authoritative stage state machine.
+// automation_core mirrors this map for its postgres backend and asserts equality
+// against this endpoint in CI (drift detector). CRM is the single source of truth.
+router.get('/pipeline/transitions', async (req, res) => {
+  try {
+    const companyId = getUserCompanyId(req);
+    const { stages, transitions } = await getPipelineStages(companyId);
+    res.json({ stages, transitions });
+  } catch (err) {
+    console.error('[CRM] GET /pipeline/transitions error:', err.message);
+    res.status(500).json({ error: 'failed to load transitions' });
+  }
+});
+
+// ───────── PROSPECT INBOX (cross-engine handoff) ──────────────────────────────
+const HANDOFF_STATUSES = ['pending', 'claimed', 'enrolled', 'done'];
+
+// POST /api/crm/prospect-inbox — enqueue a handoff (idempotent on contact+target;
+// re-enqueue of a 'done' row resets it to pending so a contact can be re-handed-off).
+router.post('/prospect-inbox', validate(), async (req, res) => {
+  try {
+    const companyId = getUserCompanyId(req);
+    const { contact_id, target_engine = null, source_engine = null, suggested_campaign = null, metadata = {} } = req.body;
+    if (!contact_id) return res.status(400).json({ error: 'contact_id required' });
+
+    // Tenant guard: the contact must belong to the caller's company.
+    const contact = await contactDb.getById(contact_id, companyId);
+    if (!contact) return res.status(404).json({ error: 'contact not found' });
+
+    const resetBody = `
+      source_engine      = COALESCE(EXCLUDED.source_engine, prospect_inbox.source_engine),
+      suggested_campaign = COALESCE(EXCLUDED.suggested_campaign, prospect_inbox.suggested_campaign),
+      metadata           = prospect_inbox.metadata || EXCLUDED.metadata,
+      status     = CASE WHEN prospect_inbox.status = 'done' THEN 'pending' ELSE prospect_inbox.status END,
+      claimed_by = CASE WHEN prospect_inbox.status = 'done' THEN NULL      ELSE prospect_inbox.claimed_by END,
+      claimed_at = CASE WHEN prospect_inbox.status = 'done' THEN NULL      ELSE prospect_inbox.claimed_at END,
+      created_at = CASE WHEN prospect_inbox.status = 'done' THEN now()     ELSE prospect_inbox.created_at END`;
+
+    let row;
+    if (target_engine === null) {
+      // Broadcast: arbiter is the partial unique index on (contact_id) WHERE target_engine IS NULL.
+      const r = await query(
+        `INSERT INTO prospect_inbox (company_id, contact_id, source_engine, target_engine, suggested_campaign, metadata)
+         VALUES ($1,$2,$3,NULL,$4,$5)
+         ON CONFLICT (contact_id) WHERE target_engine IS NULL
+         DO UPDATE SET ${resetBody} RETURNING *`,
+        [companyId, contact_id, source_engine, suggested_campaign, JSON.stringify(metadata || {})]
+      );
+      row = r.rows[0];
+    } else {
+      const r = await query(
+        `INSERT INTO prospect_inbox (company_id, contact_id, source_engine, target_engine, suggested_campaign, metadata)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (contact_id, target_engine) WHERE target_engine IS NOT NULL
+         DO UPDATE SET ${resetBody} RETURNING *`,
+        [companyId, contact_id, source_engine, target_engine, suggested_campaign, JSON.stringify(metadata || {})]
+      );
+      row = r.rows[0];
+    }
+    broadcast(req, { type: 'prospect_enqueued', row });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('[CRM] POST /prospect-inbox error:', err.message);
+    res.status(500).json({ error: 'failed to enqueue prospect' });
+  }
+});
+
+// POST /api/crm/prospect-inbox/claim — atomically claim pending rows for an engine
+// (+ broadcast rows). FOR UPDATE SKIP LOCKED prevents double-claim under concurrency.
+router.post('/prospect-inbox/claim', validate(), async (req, res) => {
+  try {
+    const companyId = getUserCompanyId(req);
+    const { target_engine = null, limit = 1, claimed_by = null } = req.body;
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 1, 1), 100);
+    const r = await query(
+      `UPDATE prospect_inbox SET status='claimed', claimed_by=$3, claimed_at=now()
+       WHERE id IN (
+         SELECT id FROM prospect_inbox
+         WHERE company_id=$1 AND status='pending'
+           AND ($2::text IS NULL OR target_engine=$2 OR target_engine IS NULL)
+         ORDER BY created_at ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT $4
+       )
+       RETURNING *`,
+      [companyId, target_engine, claimed_by, lim]
+    );
+    res.json({ claimed: r.rows });
+  } catch (err) {
+    console.error('[CRM] POST /prospect-inbox/claim error:', err.message);
+    res.status(500).json({ error: 'failed to claim prospects' });
+  }
+});
+
+// GET /api/crm/prospect-inbox?target_engine=&status=&limit=
+router.get('/prospect-inbox', async (req, res) => {
+  try {
+    const companyId = getUserCompanyId(req);
+    const { target_engine, status } = req.query;
+    const lim = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+    const conditions = ['company_id = $1'];
+    const params = [companyId];
+    let idx = 2;
+    if (target_engine !== undefined) { conditions.push(`(target_engine = $${idx++} OR target_engine IS NULL)`); params.push(target_engine); }
+    if (status !== undefined) {
+      if (!HANDOFF_STATUSES.includes(status)) return res.status(400).json({ error: 'invalid status' });
+      conditions.push(`status = $${idx++}`); params.push(status);
+    }
+    params.push(lim);
+    const r = await query(
+      `SELECT * FROM prospect_inbox WHERE ${conditions.join(' AND ')} ORDER BY created_at ASC LIMIT $${idx}`,
+      params
+    );
+    res.json({ total: r.rows.length, rows: r.rows });
+  } catch (err) {
+    console.error('[CRM] GET /prospect-inbox error:', err.message);
+    res.status(500).json({ error: 'failed to list prospects' });
+  }
+});
+
+// PATCH /api/crm/prospect-inbox/:id — transition a handoff (e.g. → enrolled | done)
+router.patch('/prospect-inbox/:id', validate(), async (req, res) => {
+  try {
+    const companyId = getUserCompanyId(req);
+    const { status, claimed_by } = req.body;
+    if (status && !HANDOFF_STATUSES.includes(status)) return res.status(400).json({ error: 'invalid status' });
+    const sets = [];
+    const params = [];
+    let idx = 1;
+    if (status) { sets.push(`status = $${idx++}`); params.push(status); }
+    if (claimed_by !== undefined) { sets.push(`claimed_by = $${idx++}`); params.push(claimed_by); }
+    if (status === 'claimed' || status === 'enrolled') { sets.push(`claimed_at = now()`); }
+    if (sets.length === 0) return res.status(400).json({ error: 'nothing to update' });
+    params.push(req.params.id, companyId);
+    const r = await query(
+      `UPDATE prospect_inbox SET ${sets.join(', ')} WHERE id = $${idx++} AND company_id = $${idx} RETURNING *`,
+      params
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'prospect not found' });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('[CRM] PATCH /prospect-inbox/:id error:', err.message);
+    res.status(500).json({ error: 'failed to update prospect' });
+  }
+});
+
 // DELETE /api/crm/contacts/:id
 router.delete('/contacts/:id', async (req, res) => {
   try {
-    const contact = await contactDb.getById(req.params.id);
+    const companyId = getUserCompanyId(req);
+    const contact = await contactDb.getById(req.params.id, companyId);
     if (!contact) return res.status(404).json({ error: 'contact not found' });
-    await query('DELETE FROM contacts WHERE id = $1', [req.params.id]);
+    await query('DELETE FROM contacts WHERE id = $1 AND company_id = $2', [req.params.id, companyId]);
     broadcast(req, { type: 'contact_deleted', id: req.params.id });
     res.json({ ok: true, deleted: contact });
   } catch (err) {
@@ -711,9 +870,10 @@ router.delete('/contacts/:id', async (req, res) => {
 // DELETE /api/crm/deals/:id
 router.delete('/deals/:id', async (req, res) => {
   try {
-    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 LIMIT 1`, [req.params.id]);
+    const companyId = getUserCompanyId(req);
+    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 AND company_id = $2 LIMIT 1`, [req.params.id, companyId]);
     if (rows.length === 0) return res.status(404).json({ error: 'deal not found' });
-    await query('DELETE FROM deals WHERE id = $1', [req.params.id]);
+    await query('DELETE FROM deals WHERE id = $1 AND company_id = $2', [req.params.id, companyId]);
     broadcast(req, { type: 'deal_deleted', id: req.params.id });
     res.json({ ok: true, deleted: rows[0] });
   } catch (err) {
@@ -725,12 +885,13 @@ router.delete('/deals/:id', async (req, res) => {
 // POST /api/crm/deals/:id/activity
 router.post('/deals/:id/activity', validate(), async (req, res) => {
   try {
+    const companyId = getUserCompanyId(req);
     const { type, message, agent, data } = req.body;
     if (!message) return res.status(400).json({ error: 'message required' });
 
     const entry = { type: type || 'note', message, agent: agent || 'system', timestamp: new Date().toISOString(), data: data || null };
 
-    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 LIMIT 1`, [req.params.id]);
+    const { rows } = await query(`SELECT * FROM deals WHERE id = $1 AND company_id = $2 LIMIT 1`, [req.params.id, companyId]);
     if (rows.length === 0) return res.status(404).json({ error: 'deal not found' });
 
     const row = rows[0];
@@ -739,8 +900,8 @@ router.post('/deals/:id/activity', validate(), async (req, res) => {
     activity.push(entry);
 
     await query(
-      `UPDATE deals SET metadata = $1, updated_at = NOW() WHERE id = $2`,
-      [JSON.stringify({ ...meta, activity }), row.id]
+      `UPDATE deals SET metadata = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3`,
+      [JSON.stringify({ ...meta, activity }), row.id, companyId]
     );
 
     broadcast(req, { type: 'deal_activity', deal_id: row.id, entry });
