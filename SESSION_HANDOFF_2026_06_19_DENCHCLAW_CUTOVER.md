@@ -17,6 +17,16 @@ ClaudeCowork sessions. Each prompt below is **self-contained** — paste it into
   Also `advance_stage` now defers to the CRM (raises `CrmStageError` on illegal transitions; no client-side linear guard),
   and `add_contact_activity`/`advance_stage`/`get_activity` take an optional `company_id`.
 
+## Local CRM left running for A/B/C verification (no need to stand up your own)
+A throwaway CRM is up on this machine so the engine cutovers can verify end-to-end immediately:
+- **Base URL:** `http://127.0.0.1:3100`  ·  **Health:** `GET /health`
+- **Key (acts for any company, '*'):** `CRM_API_KEY=cp1-main-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
+- **DB:** throwaway Postgres `denchclaw` in Docker container `denchclaw-crm-test` on host `:5434`
+  (`migrations/002_prospect_inbox.sql` already applied).
+- To verify a cutover: `CRM_BACKEND=api CRM_API_BASE=http://127.0.0.1:3100 CRM_API_KEY=<above>` then exercise
+  the engine path and `GET /api/crm/prospect-inbox`.
+- Teardown when all engine cutovers are verified: `docker rm -f denchclaw-crm-test` + kill the `:3100` node process.
+
 ## The ONE architectural decision the cutover must resolve (read before any engine prompt)
 Under `CRM_BACKEND=api`, **contacts live in the denchclaw CRM DB**, but each engine's
 `campaigns` + `campaign_events` tables live in the **engine's own DB**. The nurturing consumer today
@@ -144,10 +154,12 @@ GOAL: roll the DenchClaw CRM contract changes to staging.
 1. Apply the new migration to the live denchclaw DB (the CRM agent never runs DDL on it):
    psql "$DENCHCLAW_DATABASE_URL" -f denchclaw-crm/migrations/002_prospect_inbox.sql
    (creates prospect_inbox + its two partial unique indexes + indexes; idempotent / IF NOT EXISTS).
-2. Configure key→company isolation on the CRM service. Set INTERNAL_API_KEYS (JSON) mapping each engine's
-   key to its allowed company set, e.g. {"<engine_key>":["growthclub"]}. If you keep a single shared key,
-   set it to "*" to preserve current behavior (no isolation) — but prefer per-tenant keys. Restart:
-   pm2 restart denchclaw-crm && curl -s http://127.0.0.1:3100/health
+2. Auth/isolation — DECIDED 2026-06-19: keep the SINGLE shared key for now (isolation deferred).
+   Leave INTERNAL_API_KEYS UNSET → the existing single INTERNAL_API_KEY falls back to "*" (any company),
+   i.e. no behavior change and NO engine .env key changes needed. (Row-scoping 404s still apply; only the
+   403 key→company binding is deferred.) Restart: pm2 restart denchclaw-crm && curl -s http://127.0.0.1:3100/health
+   To turn on real isolation later: set INTERNAL_API_KEYS={"<key>":["<company>"]} per tenant and update
+   each engine's CRM_API_KEY to match — that's a separate follow-on.
 3. Engine .env (outreach/nurturing/content) already have CRM_BACKEND=api + CRM_API_BASE + CRM_API_KEY
    (per the SESSION_5 addendum). After the engine-cutover PRs (Prompts A/B/C) merge + deploy, restart the
    engines: pm2 restart outreach-engine-py nurturing-engine content-engine-py.
