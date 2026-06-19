@@ -137,14 +137,21 @@ router.get('/contacts', async (req, res) => {
   try {
     const companyId = getUserCompanyId(req);
     if (!companyId) return res.status(401).json({ error: 'Authentication required' });
-    const { score, source, search, stage, limit, offset } = req.query;
+    const { score, source, search, stage, limit, offset, tags } = req.query;
     const paginated = limit !== undefined || offset !== undefined;
+
+    // tags overlap filter — accepts ?tags=a,b or repeated ?tags=a&tags=b.
+    // Powers the send-side enrolled-contact query under CRM_BACKEND=api.
+    const tagList = tags === undefined
+      ? undefined
+      : (Array.isArray(tags) ? tags : String(tags).split(',')).map(s => String(s).trim()).filter(Boolean);
 
     const contacts = await contactDb.list(companyId, {
       search,
       dealStage: stage,
       leadScore: score,
       source,
+      ...(tagList && tagList.length ? { tags: tagList } : {}),
       ...(paginated ? { limit, offset } : {}),
     });
 

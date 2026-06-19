@@ -28,7 +28,7 @@ and disqualification from anywhere (`*→lost`). The CRM is authoritative: an il
 ## Endpoints (base `/api/crm`)
 | Method · Path | Purpose | Notes |
 |---|---|---|
-| GET `/contacts?search=&score=&source=&stage=&limit=&offset=` | list/find | search matches name/email/company |
+| GET `/contacts?search=&score=&source=&stage=&tags=&limit=&offset=` | list/find | search matches name/email/company; `tags` = `a,b` or repeated `tags=a&tags=b` → array-overlap filter (powers the send-side enrolled-contact query under `CRM_BACKEND=api`) |
 | POST `/contacts` | create/upsert | dedup email→linkedin→phone; `company`↔`company_name` mapping |
 | GET `/contacts/:id` | read | company-scoped (404) |
 | PATCH `/contacts/:id` | update / **advance stage** (`{deal_stage}`) | scoped; 400 on illegal transition |

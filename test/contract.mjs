@@ -224,6 +224,19 @@ async function main() {
     }
   }
 
+  // 19 — tags overlap filter on GET /contacts (send-side enrolled-contact query)
+  {
+    const tag = 'enrolltest_' + RUN;
+    const a = await req('POST', '/api/crm/contacts', { company: CO_A, body: { name: 'Tagged', email: email('tagged'), source: 'manual', tags: [tag] } });
+    await req('POST', '/api/crm/contacts', { company: CO_A, body: { name: 'Untagged', email: email('untagged'), source: 'manual' } });
+    const r = await req('GET', `/api/crm/contacts?tags=${encodeURIComponent(tag)}`, { company: CO_A });
+    const rows = r.json?.contacts || [];
+    const hasTagged = rows.some(c => c.id === a.json?.id);
+    const onlyTagged = rows.every(c => (c.tags || []).includes(tag));
+    check('GET /contacts?tags= filters by tag overlap', 'CP4', r.status === 200 && hasTagged && onlyTagged && rows.length >= 1,
+      `status=${r.status} n=${rows.length} hasTagged=${hasTagged} onlyTagged=${onlyTagged}`);
+  }
+
   console.log(results.join('\n'));
   console.log(`\n${pass} passed, ${fail} failed  (PHASE=${PHASE})\n`);
   process.exit(fail === 0 ? 0 : 1);
