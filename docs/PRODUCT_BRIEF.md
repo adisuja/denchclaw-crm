@@ -1,3 +1,5 @@
+> **STATUS 2026-06-22 — `CRM_BACKEND=api` cutover SHIPPED + verified on staging** (real Postgres, both backends). Full record: `pro-workflows/docs/AUTOMATION_ENGINES_PY/PROGRESS.md`.
+
 # DenchClaw CRM — Product Brief
 
 > Layer 1 (Karpathy SPEC). The shared backend the three automation engines integrate with,
