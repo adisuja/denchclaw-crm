@@ -40,6 +40,14 @@ async function list(companyId, filters = {}) {
     params.push(`%${filters.search}%`);
     idx++;
   }
+  if (filters.phone) {
+    // Normalized digit-only match (inbound webhook contact resolution).
+    const digits = String(filters.phone).replace(/\D/g, '');
+    if (digits) {
+      conditions.push(`regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g') = $${idx++}`);
+      params.push(digits);
+    }
+  }
 
   conditions.push('deleted_at IS NULL');
   const where = `WHERE ${conditions.join(' AND ')}`;

@@ -237,6 +237,19 @@ async function main() {
       `status=${r.status} n=${rows.length} hasTagged=${hasTagged} onlyTagged=${onlyTagged}`);
   }
 
+  // 20 — phone overlap filter (inbound webhook contact resolution)
+  {
+    const last4 = String(RUN).slice(-4);
+    const ph = `(415) 555-${last4}`;                       // stored digits: 415555<last4>
+    const c = await req('POST', '/api/crm/contacts', { company: CO_A, body: { name: 'Phoned', email: email('phoned'), phone: ph, source: 'manual' } });
+    // query a differently-formatted but digit-equal value to prove normalization
+    const r = await req('GET', `/api/crm/contacts?phone=${encodeURIComponent(`415-555-${last4}`)}`, { company: CO_A });
+    const rows = r.json?.contacts || [];
+    check('GET /contacts?phone= normalized digit match', 'CP4',
+      r.status === 200 && rows.some(x => x.id === c.json?.id),
+      `status=${r.status} n=${rows.length}`);
+  }
+
   console.log(results.join('\n'));
   console.log(`\n${pass} passed, ${fail} failed  (PHASE=${PHASE})\n`);
   process.exit(fail === 0 ? 0 : 1);

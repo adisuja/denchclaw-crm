@@ -137,7 +137,7 @@ router.get('/contacts', async (req, res) => {
   try {
     const companyId = getUserCompanyId(req);
     if (!companyId) return res.status(401).json({ error: 'Authentication required' });
-    const { score, source, search, stage, limit, offset, tags } = req.query;
+    const { score, source, search, stage, limit, offset, tags, phone } = req.query;
     const paginated = limit !== undefined || offset !== undefined;
 
     // tags overlap filter — accepts ?tags=a,b or repeated ?tags=a&tags=b.
@@ -152,6 +152,7 @@ router.get('/contacts', async (req, res) => {
       leadScore: score,
       source,
       ...(tagList && tagList.length ? { tags: tagList } : {}),
+      ...(phone ? { phone } : {}),
       ...(paginated ? { limit, offset } : {}),
     });
 
