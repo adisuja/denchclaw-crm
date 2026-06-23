@@ -1,5 +1,26 @@
 'use strict';
-require('dotenv').config();
+// Env load: local ./.env (and real OS env) win; the shared automation env then
+// fills the service-to-service handshake keys (INTERNAL_API_KEYS / CRM_API_KEY)
+// so they live in ONE place alongside the engines. The CRM uses its OWN denchclaw
+// DB, so the shared automation DATABASE_URL is never allowed to leak in.
+const fs = require('fs');
+const path = require('path');
+const dotenv = require('dotenv');
+dotenv.config(); // local ./.env + OS env take priority
+const _hadDbUrl = !!process.env.DATABASE_URL;
+let _shared = process.env.AUTOMATION_ENV_FILE;
+if (!_shared || !fs.existsSync(_shared)) {
+  let dir = __dirname;
+  for (let i = 0; i < 8 && dir !== path.dirname(dir); i++) {
+    const c1 = path.join(dir, 'automation-engines-shared', '.env.shared');
+    const c2 = path.join(dir, '.env.shared');
+    if (fs.existsSync(c1)) { _shared = c1; break; }
+    if (fs.existsSync(c2)) { _shared = c2; break; }
+    dir = path.dirname(dir);
+  }
+}
+if (_shared && fs.existsSync(_shared)) dotenv.config({ path: _shared, override: false });
+if (!_hadDbUrl) delete process.env.DATABASE_URL; // CRM must use its own denchclaw DB
 const express = require('express');
 const { initDatabase, healthCheck } = require('./db/index');
 
